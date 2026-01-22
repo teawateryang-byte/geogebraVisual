@@ -8,7 +8,6 @@
   --accent: #78a6ff;
 }
 
-* { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body {
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
@@ -29,18 +28,31 @@ body {
   inset: 0;
 }
 
+/* 重要：GeoGebra HTML5 不是 iframe，会直接插入当前 DOM。
+   因此不要用全局 * / button / textarea 样式去污染 GeoGebra 的内部 UI。
+   下面的交互控件样式全部收敛到对话框面板内部。 */
+.floatingPanel, .floatingPanel * {
+  box-sizing: border-box;
+}
+
 .floatingPanel {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  width: min(520px, calc(100vw - 36px));
+  position: fixed;
+  /* left/top 由 React 通过 style 控制（可拖动） */
+  width: 330px;
+  height: 630px;
+  max-width: calc(100vw - 36px);
+  max-height: calc(100vh - 36px);
   background: var(--panel);
   border: 1px solid var(--panelBorder);
   border-radius: 14px;
   backdrop-filter: blur(10px);
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  z-index: 50;
 }
+
 
 .panelHeader {
   padding: 12px 14px;
@@ -48,7 +60,16 @@ body {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
 }
+
+.floatingPanel.dragging .panelHeader {
+  cursor: grabbing;
+}
+
 
 .panelHeader .title {
   font-weight: 650;
@@ -63,9 +84,14 @@ body {
   color: var(--muted);
 }
 
-.panelBody { padding: 12px 14px; }
+.panelBody {
+  padding: 12px 14px;
+  flex: 1;
+  overflow: auto;
+}
 
-textarea {
+
+.floatingPanel textarea {
   width: 100%;
   resize: vertical;
   min-height: 84px;
@@ -79,7 +105,7 @@ textarea {
   line-height: 1.35;
 }
 
-textarea::placeholder { color: rgba(255, 255, 255, 0.45); }
+.floatingPanel textarea::placeholder { color: rgba(255, 255, 255, 0.45); }
 
 .row {
   margin-top: 10px;
@@ -89,7 +115,7 @@ textarea::placeholder { color: rgba(255, 255, 255, 0.45); }
   justify-content: flex-end;
 }
 
-button {
+.floatingPanel button {
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
@@ -98,12 +124,12 @@ button {
   cursor: pointer;
 }
 
-button.primary {
+.floatingPanel button.primary {
   border-color: rgba(120, 166, 255, 0.55);
   background: rgba(120, 166, 255, 0.18);
 }
 
-button:disabled {
+.floatingPanel button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -129,11 +155,58 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(0, 0, 0, 0.18);
   color: rgba(255, 255, 255, 0.86);
-  white-space: pre-wrap;
-  line-height: 1.35;
+  line-height: 1.45;
   max-height: 220px;
   overflow: auto;
 }
+
+/* Markdown 富文本排版（仅作用于 AI 解释区） */
+.output.markdown :is(p, ul, ol, pre, blockquote) {
+  margin: 0 0 8px;
+}
+
+.output.markdown :is(h1, h2, h3) {
+  margin: 10px 0 8px;
+  line-height: 1.25;
+}
+
+.output.markdown h1 { font-size: 15px; }
+.output.markdown h2 { font-size: 14px; }
+.output.markdown h3 { font-size: 13px; }
+
+.output.markdown ul, .output.markdown ol {
+  padding-left: 18px;
+}
+
+.output.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.output.markdown pre {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.24);
+  overflow: auto;
+}
+
+.output.markdown pre code {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+/* KaTeX 公式颜色适配深色背景 */
+.output.markdown .katex {
+  color: rgba(255, 255, 255, 0.90);
+}
+
 
 .commands {
   margin-top: 10px;
@@ -143,7 +216,15 @@ button:disabled {
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(0, 0, 0, 0.28);
-  color: rgba(255, 255, 255, 0.85);
+  color: rgba(255, 255, 255, 0.90);
   max-height: 150px;
   overflow: auto;
+  white-space: pre;
+  margin-bottom: 0;
 }
+
+.commands code {
+  font-family: inherit;
+}
+
+

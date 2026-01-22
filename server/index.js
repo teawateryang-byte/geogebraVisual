@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3002;
 
 const SYSTEM_PROMPT = `你是一个几何学助手，可以通过GeoGebra绘制几何图形和动画。
 
@@ -52,24 +52,82 @@ GeoGebra支持的命令类型包括：
 - 列表：{a, b, c}
 - 条件表达式：If(condition, then, else)
 - 文本对象：Text("文本", (x, y))
+- 脚本按钮（示意）：点击脚本中使用 RunClickScript("命令")
+
+## 动画示例
+
+### 1. 创建滑块并用于动画：
+  a = Slider[0, 10, 0.1]
+  P = (a, 0)
+  StartAnimation[a, true]
+
+### 2. 圆上运动的点：
+  a = Slider[0, 2π, 0.01]
+  P = (5 cos(a), 5 sin(a))
+  Circle((0, 0), 5)
+  StartAnimation[a, true]
+
+### 3. 函数图像的动态变化：
+  a = Slider[0, 5, 0.1]
+  f(x) = a x^2
+  StartAnimation[a, true]
 
 请确保命令语法正确，并在解释中提及每个命令的目的。
-如果用户的请求不明确，请提出澄清问题。`;
+如果用户的请求不明确，请提出澄清问题。
+用户的请求可能与之前提出的请求相关。
+
+多轮对话（重要）：
+- 你会收到历史对话消息（用户与助手的内容），请把它当作同一张 GeoGebra 构造的延续。
+- 当用户说“在上一次基础上/继续/再加/修改”时，优先复用已有对象名称与参数，不要无故重命名；**不要重复输出未变化的旧命令**，只输出新增命令或确实需要修改的命令（重复定义可能导致重名冲突/执行失败）。
+
+- 如果必须引用之前对象，请沿用历史里出现的对象名（如 O, A, B, a 等）。
+
+兼容性约束（重要）：
+
+- 除非用户明确要求“脚本按钮/点击脚本/更新脚本/自动脚本”，否则不要输出 RunClickScript / RunUpdateScript / SetClickScript / SetUpdateScript / Execute / Button 等脚本相关命令。
+
+- 需要动画时，优先使用 Slider + StartAnimation + SetAnimationSpeed/SetTrace/Locus 等标准命令实现，不要用脚本替代。`;
+
+
+
+
+function sanitizeCommands(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((l) => String(l || '').trim())
+    .filter(Boolean)
+    // 基础注释过滤（按你的规范：代码块内不应有注释）
+    .filter((l) => !/^\/\//.test(l))
+    .filter((l) => !/^#/.test(l))
+    .filter((l) => !/^\/\*/.test(l))
+    .filter((l) => !/^\*\//.test(l))
+    // 兼容性过滤：GeoGebra HTML5 有时脚本模块未加载就执行会报错（Class$S381）
+    // 除非用户明确要求脚本按钮，否则避免把这类“脚本命令”下发给前端执行。
+    .filter((l) => !/^RunClickScript\s*\(/i.test(l))
+    .filter((l) => !/^RunUpdateScript\s*\(/i.test(l))
+    .filter((l) => !/^SetClickScript\s*\(/i.test(l))
+    .filter((l) => !/^SetUpdateScript\s*\(/i.test(l))
+    .filter((l) => !/^Execute\s*\(/i.test(l))
+    .filter((l) => !/^Button\s*\(/i.test(l));
+}
+
+
+
 
 function extractGeoGebraBlock(text) {
   if (!text) return { commands: [], explanation: '' };
 
   const s = String(text);
-  // 兼容：```geogebra\n...```（结尾可能不带换行）
-  const fence = /```\s*geogebra\s*\n([\s\S]*?)```/i;
+  // 兼容：```geogebra\n...``` / ```geogebra\r\n...```（结尾可能不带换行）
+  const fence = /```\s*geogebra\s*\r?\n([\s\S]*?)```/i;
   const m = s.match(fence);
 
-
   const commands = m
-    ? m[1]
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean)
+    ? sanitizeCommands(
+        m[1]
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean)
+      )
     : [];
 
   // explanation：去掉代码块后剩余内容
@@ -77,6 +135,7 @@ function extractGeoGebraBlock(text) {
 
   return { commands, explanation };
 }
+
 
 function ruleBasedFallback(userText) {
   const t = String(userText || '').trim();
@@ -119,7 +178,23 @@ function ruleBasedFallback(userText) {
   };
 }
 
-async function callDeepSeekChat({ userText }) {
+function normalizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+  const allowed = new Set(['user', 'assistant']);
+
+  // 控制上下文长度，避免 token 过大
+  const MAX_MESSAGES = 8; // 最近 4 轮
+  const MAX_CHARS_PER_MESSAGE = 4000;
+
+  return history
+    .filter((m) => m && allowed.has(m.role) && typeof m.content === 'string')
+    .map((m) => ({ role: m.role, content: m.content.trim().slice(0, MAX_CHARS_PER_MESSAGE) }))
+    .filter((m) => m.content)
+    .slice(-MAX_MESSAGES);
+}
+
+async function callDeepSeekChat({ userText, history }) {
+
   const apiKey = process.env.DEEPSEEK_API_KEY;
   const baseURL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
   const model = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
@@ -136,8 +211,10 @@ async function callDeepSeekChat({ userText }) {
       model,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
+        ...normalizeHistory(history),
         { role: 'user', content: userText }
       ],
+
       temperature: 0.2
     },
     {
@@ -171,24 +248,36 @@ app.post('/api/translate', async (req, res) => {
       return res.status(400).json({ error: 'text 不能为空' });
     }
 
-    const result = await callDeepSeekChat({ userText: text.trim() });
+    const history = req?.body?.history;
+    const result = await callDeepSeekChat({ userText: text.trim(), history });
 
-    if (!result.commands || result.commands.length === 0) {
-      // 如果 LLM 没输出命令块，给出明确提示
-      return res.status(422).json({
-        error:
-          'AI 返回中没有解析到 GeoGebra 命令块（需要用 ```geogebra ... ``` 包裹）。你可以更具体地描述：对象名称、位置、参数范围、是否需要动画等。',
-        explanation: result.explanation || '',
-        raw: result.raw || null
+
+    // 最终防线：无论 LLM 返回什么，后端在响应前再做一次命令清洗，避免前端执行到不兼容命令。
+    const safeCommands = sanitizeCommands(result.commands || []);
+
+    if (!safeCommands || safeCommands.length === 0) {
+
+      // 兼容 prompt 的“澄清提问”路径：允许只返回解释（不强行当成错误）。
+      return res.json({
+        explanation:
+          result.explanation ||
+          '我需要你补充一些关键信息（例如对象名称、位置/坐标、参数范围、是否需要动画），然后我才能给出可执行的 GeoGebra 命令。',
+        commands: [],
+        needClarification: true,
+        raw: process.env.RETURN_RAW === 'true' ? result.raw : undefined,
+        mode: result.mode
       });
     }
 
     return res.json({
       explanation: result.explanation || '',
-      commands: result.commands,
+      commands: safeCommands,
+      needClarification: false,
       raw: process.env.RETURN_RAW === 'true' ? result.raw : undefined,
       mode: result.mode
     });
+
+
   } catch (e) {
     const message = e?.response?.data ? JSON.stringify(e.response.data) : e?.message || 'AI 服务异常';
     return res.status(500).json({ error: message });
